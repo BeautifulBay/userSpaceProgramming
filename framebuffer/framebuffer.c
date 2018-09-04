@@ -151,10 +151,10 @@ static void bound_X_Y(struct framebuffer_data *test)
 		test->cur_x = test->X_0;
 		test->cur_y += 16;
 	} else if (test->cur_x < test->X_0) {
-		test->cur_x = test->X_M;
+		test->cur_x = test->X_M - 8;
 		test->cur_y -= 16;
 	}
-	if (test->cur_y >= test->X_M || test->cur_y < test->Y_0) {
+	if (test->cur_y >= test->Y_M || test->cur_y < test->Y_0) {
 		printf("Out of range, so reset (0, 0)!\n");
 		test->cur_x = test->X_0;
 		test->cur_y = test->Y_0;
@@ -302,10 +302,15 @@ static void *input_thread(void *msg)
 						if (test->ev[j].type == EV_KEY && test->ev[j].value == 1) {
 							//printf("\nev.type = %d, ev.code = %d, ev.value = %d, j = %d\n", test->ev[j].type, test->ev[j].code, test->ev[j].value, j);
 							switch (test->ev[j].code) {
+							case KEY_TAB:
+								test->cur_x += 4*8;
+								bound_X_Y(test);
+								break;
 							case KEY_F5:
 								test->clear(test);
 								break;
 							case KEY_LEFTSHIFT:
+							case KEY_RIGHTSHIFT:
 								test->shift = 1;
 								break;
 							case KEY_ENTER:
@@ -323,8 +328,9 @@ static void *input_thread(void *msg)
 								test->index = j;
 								sem_post(&test->display_sem);
 							}
-						} else if (test->ev[j].type == EV_KEY && test->ev[j].code == KEY_LEFTSHIFT && test->ev[j].value == 0) {
-							test->shift = 0;
+						} else if (test->ev[j].type == EV_KEY && test->ev[j].value == 0) {
+							if (test->ev[j].code == KEY_LEFTSHIFT || test->ev[j].code == KEY_RIGHTSHIFT)
+								test->shift = 0;
 						}
 						if (++j >= 4) {
 							//printf("index is out of range! j = %d\n", j);
