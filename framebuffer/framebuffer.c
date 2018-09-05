@@ -4,6 +4,7 @@
 #include <pthread.h>
 #include <semaphore.h>
 #include <string.h>
+#include <unistd.h>
 #include <linux/fb.h>
 #include <linux/input.h>
 #include <sys/mman.h>
@@ -33,7 +34,7 @@ struct framebuffer_data {
 #define INPUT_DIR      "/dev/input"
 #define EPOLL_SIZE_MAX 16
 #define READ_DATA      1024
-	int fd;
+	int fb_fd;
 	int epoll_fd;
 	struct fb_var_screeninfo var;
 	struct fb_fix_screeninfo fix;
@@ -50,9 +51,10 @@ struct framebuffer_data {
 	pthread_mutex_t buffer_mutex;
 	struct input_event ev[4];
 	char read_data[READ_DATA];
-	int index;
-	int flag;
-	int shift;
+	int key_down_index;
+	int pthread_exit;
+	int shift_down;
+	int cursor_sync;
 	int (*init) (struct framebuffer_data*);
 	int (*run) (struct framebuffer_data*);
 	int (*clear) (struct framebuffer_data*);
@@ -62,13 +64,13 @@ struct framebuffer_data {
 /* init subject */
 static int init_framebuffer(struct framebuffer_data *test)
 {
-	test->fd = open(FRAMEBUFF_FD, O_RDWR);
-	if (test->fd < 0) {
+	test->fb_fd = open(FRAMEBUFF_FD, O_RDWR);
+	if (test->fb_fd < 0) {
 		printf("open fb0 error!\n");
-		return test->fd;
+		return test->fb_fd;
 	}
 
-	if (ioctl(test->fd, FBIOGET_VSCREENINFO, &test->var) < 0) {
+	if (ioctl(test->fb_fd, FBIOGET_VSCREENINFO, &test->var) < 0) {
 		printf("ioctl get VSCREENINFO error!\n");
 		goto err;
 	}
@@ -81,11 +83,12 @@ static int init_framebuffer(struct framebuffer_data *test)
 	test->Y_M = test->var.yres;
 	test->cur_x = test->X_0;
 	test->cur_y = test->Y_0;
-	test->shift = 0;
-	test->index = 0;
-	test->flag  = 0;
+	test->shift_down     = 0;
+	test->key_down_index = 0;
+	test->pthread_exit   = 0;
+	test->cursor_sync    = 0;
 
-	test->framebuffer = (unsigned int *)mmap(NULL, test->screen_size, PROT_READ | PROT_WRITE, MAP_SHARED, test->fd, 0);
+	test->framebuffer = (unsigned int *)mmap(NULL, test->screen_size, PROT_READ | PROT_WRITE, MAP_SHARED, test->fb_fd, 0);
 	if (test->framebuffer == (unsigned int*) -1) {
 		printf("mmap error!\n");
 		goto err;
@@ -96,7 +99,7 @@ static int init_framebuffer(struct framebuffer_data *test)
 
 	return 0;
 err:
-	close(test->fd);
+	close(test->fb_fd);
 	return -1;
 }
 
@@ -105,14 +108,14 @@ static int decode_key_value_to_ascii(struct framebuffer_data *test, int code)
 {
 	int i = 0;
 #ifdef USE_ARRAY
-	return test->shift ?  key_ascii2[code] : key_ascii[code];
+	return test->shift_down ?  key_ascii2[code] : key_ascii[code];
 #else
 	int count = sizeof(key_ascii) / sizeof(key_ascii[0]);
 	for (i = 0; i < count; i++) {
 		if (key_ascii[i].key == code )
 			return key_ascii[i].ascii;
 	}
-	return -1;
+	return 0;
 #endif
 }
 
@@ -185,23 +188,23 @@ static void draw_char(struct framebuffer_data *test, char ascii)
 static void display_char(struct framebuffer_data *test)
 {
 	int ascii = -1;
-	if (test->ev[test->index].type == EV_KEY) {
-		if (test->ev[test->index].code == KEY_BACKSPACE)
+	if (test->ev[test->key_down_index].type == EV_KEY) {
+		if (test->ev[test->key_down_index].code == KEY_BACKSPACE)
 		{
 			test->cur_x -= 8;
 			bound_X_Y(test);
 			draw_char(test, 0);
 		} else {
-			ascii = decode_key_value_to_ascii(test, test->ev[test->index].code);
-			if (ascii == -1) {
-				printf("Cannot decode ev.code = %d\n", test->ev[test->index].code);
+			ascii = decode_key_value_to_ascii(test, test->ev[test->key_down_index].code);
+			if (ascii == 0) {
+				printf("Cannot decode ev.code = %d\n", test->ev[test->key_down_index].code);
 			} else {
 #ifdef USE_ARRAY
-				//printf("code = %d, shift = %d, ascii = %d\n", test->ev[test->index].code, test->shift, ascii);
+				//printf("code = %d, shift_down = %d, ascii = %d\n", test->ev[test->key_down_index].code, test->shift_down, ascii);
 				draw_char(test, ascii);
 #else
 				if (ascii >= 'A' && ascii <= 'Z') {
-					if (test->shift == 1)
+					if (test->shift_down == 1)
 						draw_char(test, ascii);
 					else
 						draw_char(test, ascii + 32);
@@ -214,17 +217,111 @@ static void display_char(struct framebuffer_data *test)
 	}
 }
 
+/* get dot color */
+static void get_pixel(struct framebuffer_data *test, unsigned int x, unsigned int y, unsigned int *color)
+{
+	unsigned char *color8 = (unsigned char *)test->framebuffer + y * test->line_width + x * test->var.bits_per_pixel / 8;
+	unsigned short *color16 = (unsigned short *)color8;
+	unsigned int *color32 = (unsigned int *)color8;
+	unsigned int red, blue, green;
+
+	switch(test->var.bits_per_pixel)
+	{
+		case 8:
+			*color = *color8;
+			break;
+		case 16:
+			red   = ((*color16 >> 11) << 3) & 0xFF;
+			blue  = ((*color16 << 5)  << 2) & 0xFF;
+			green = ((*color16 >> 0)  << 3) & 0xFF;
+			*color = (red << 16)  | (green << 8) | (blue << 0);
+			break;
+		case 32:
+			*color = *color32;
+			break;
+		default:
+			printf("%d is not supported!\n", test->var.bits_per_pixel);
+			break;
+	}
+}
+
+/* get cursor data */
+static void get_cursor_data(struct framebuffer_data *test, unsigned int data1[16][8], unsigned int data2[16][8])
+{
+	unsigned int color = 0;
+	int i, j;
+	for (i = 0; i < 16; i++) {
+		for (j = 0; j < 8; j++) {
+			get_pixel(test, test->cur_x + j, test->cur_y + i, &color);
+			data1[i][j] = color;
+			data2[i][j] = ~color;
+		}
+	}
+}
+
+/* draw cursor */
+static void draw_cursor(struct framebuffer_data *test, int last_x, int last_y, unsigned int color[16][8])
+{
+	int i, j;
+	for (i = 0; i < 16; i++) {
+		for (j = 0; j < 8; j++) {
+			draw_pixel(test, last_x + j, last_y + i, color[i][j]);
+		}
+	}
+}
+
+/* draw cursor thread */
+static void *cursor_display_thread(void *msg)
+{
+	struct framebuffer_data *test = (struct framebuffer_data *)msg;
+	int last_x = 0;
+	int last_y = 0;
+	unsigned int cursor_data[16][8] = { 0 };
+	unsigned int cursor_data_reverse[16][8] = { 0 };
+	while (1) {
+		if (test->pthread_exit == 1)
+			break;
+		pthread_mutex_lock(&test->buffer_mutex);
+		if (last_x != test->cur_x || last_y != test->cur_y) {
+			last_x = test->cur_x;
+			last_y = test->cur_y;
+			get_cursor_data(test, cursor_data, cursor_data_reverse);
+		}
+		if (test->cursor_sync == 1) {
+			test->cursor_sync = 0;
+			draw_cursor(test, last_x, last_y, cursor_data);
+		} else {
+			test->cursor_sync = 1;
+			draw_cursor(test, last_x, last_y, cursor_data_reverse);
+		}
+		pthread_mutex_unlock(&test->buffer_mutex);
+		if (test->cursor_sync == 1) {
+			usleep(100 * 1000);
+		} else {
+			usleep(500 * 1000);
+		}
+	}
+}
+
 /* display thread */
 static void *display_thread(void *msg)
 {
 	struct framebuffer_data *test = (struct framebuffer_data *)msg;
-	while (1) {
-		sem_wait(&test->display_sem);
-		if (test->flag == 1)
-			break;
-		pthread_mutex_lock(&test->buffer_mutex);
-		display_char(test);
-		pthread_mutex_unlock(&test->buffer_mutex);
+	pthread_t cursor_id;
+
+	if(pthread_create(&cursor_id, NULL, cursor_display_thread, (void *)test) != 0) {
+		printf("pthread create cursor_display_thread error!\n");
+	} else {
+		while (1) {
+			sem_wait(&test->display_sem);
+			if (test->pthread_exit == 1)
+				break;
+			while(test->cursor_sync);
+			pthread_mutex_lock(&test->buffer_mutex);
+			display_char(test);
+			pthread_mutex_unlock(&test->buffer_mutex);
+		}
+		pthread_join(cursor_id, NULL);
 	}
 }
 
@@ -281,7 +378,7 @@ static void *input_thread(void *msg)
 
 	init_input(test);	
 	while (1) {
-		if (test->flag == 1) {
+		if (test->pthread_exit == 1) {
 			break;
 		}
 		npolledevents = epoll_wait(test->epoll_fd, polledevents, EPOLL_SIZE_MAX, -1);
@@ -294,6 +391,7 @@ static void *input_thread(void *msg)
 					printf("read %d error!\n", polledevents[i].data.fd);
 				else {
 					int j = 0;
+					while(test->cursor_sync);
 					pthread_mutex_lock(&test->buffer_mutex);
 					while(nread / sizeof(test->ev[0])) {
 						memcpy(&test->ev[j], (struct input_event *)&test->read_data[j*sizeof(test->ev[0])], sizeof(test->ev[0]));
@@ -311,7 +409,7 @@ static void *input_thread(void *msg)
 								break;
 							case KEY_LEFTSHIFT:
 							case KEY_RIGHTSHIFT:
-								test->shift = 1;
+								test->shift_down = 1;
 								break;
 							case KEY_ENTER:
 								test->cur_x = test->X_0;
@@ -323,14 +421,14 @@ static void *input_thread(void *msg)
 								bound_X_Y(test);
 								break;
 							case KEY_ESC:
-								test->flag = 1;
+								test->pthread_exit = 1;
 							default:
-								test->index = j;
+								test->key_down_index = j;
 								sem_post(&test->display_sem);
 							}
 						} else if (test->ev[j].type == EV_KEY && test->ev[j].value == 0) {
 							if (test->ev[j].code == KEY_LEFTSHIFT || test->ev[j].code == KEY_RIGHTSHIFT)
-								test->shift = 0;
+								test->shift_down = 0;
 						}
 						if (++j >= 4) {
 							//printf("index is out of range! j = %d\n", j);
@@ -380,7 +478,7 @@ static int exit_framebuffer(struct framebuffer_data *test)
 	munmap(test->framebuffer, test->screen_size);
 	sem_destroy(&test->display_sem);
 	pthread_mutex_destroy(&test->buffer_mutex);
-	close(test->fd);
+	close(test->fb_fd);
 }
 
 /* init framebuffer functions */
