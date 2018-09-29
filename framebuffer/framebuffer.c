@@ -232,7 +232,7 @@ static void get_pixel(struct framebuffer_data *test, unsigned int x, unsigned in
 			break;
 		case 16:
 			red   = ((*color16 >> 11) << 3) & 0xFF;
-			blue  = ((*color16 << 5)  << 2) & 0xFF;
+			blue  = ((*color16 >> 5)  << 2) & 0xFF;
 			green = ((*color16 >> 0)  << 3) & 0xFF;
 			*color = (red << 16)  | (green << 8) | (blue << 0);
 			break;
@@ -326,7 +326,7 @@ static void *display_thread(void *msg)
 }
 
 /* init epoll */
-static init_input(struct framebuffer_data *test)
+static int init_input(struct framebuffer_data *test)
 {
 	DIR *input_dir;
 	struct dirent *event_n;
@@ -336,7 +336,7 @@ static init_input(struct framebuffer_data *test)
 	test->epoll_fd = epoll_create(EPOLL_SIZE_MAX);
 	if (test->epoll_fd == -1) {
 		printf("epoll create error!\n");
-		return;
+		return -1;
 	}
 	input_dir = opendir(INPUT_DIR);
 	if (input_dir != 0) {
@@ -366,6 +366,7 @@ static init_input(struct framebuffer_data *test)
 			}
 		}
 	}
+	return 0;
 }
 
 /* input thread */
@@ -376,7 +377,7 @@ static void *input_thread(void *msg)
 	int npolledevents;
 	struct framebuffer_data *test = (struct framebuffer_data *)msg;
 
-	init_input(test);	
+	if(init_input(test)) return;
 	while (1) {
 		if (test->pthread_exit == 1) {
 			break;
