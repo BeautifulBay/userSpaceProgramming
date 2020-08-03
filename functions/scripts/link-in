@@ -1,0 +1,10 @@
+#!/bin/bash
+
+CUR=`pwd`
+
+mkdir -p ${OBJ_PATH}
+cd ${OBJ_PATH}
+while read cmd; do
+    rm $cmd
+	ln -svT test-cmd $cmd 
+done < ../../../cmdlist

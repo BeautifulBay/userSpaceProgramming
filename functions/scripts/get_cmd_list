@@ -1,0 +1,11 @@
+#!/bin/bash
+
+:> cmdlist
+for func in `sed -n 's/^\s*int\s*\(\S*\)\s*(\s*int\s*argc\s*,\s*char\s*\*argv.*/\1/p' src/test.h`; do
+    [ "$func" != "main" ] && echo ${func//_/-} >> cmdlist
+done
+
+:> build/cmdlist.inc
+while read cmd; do
+	echo "{ \"$cmd\", ${cmd//-/_} }," >> build/cmdlist.inc
+done < cmdlist
