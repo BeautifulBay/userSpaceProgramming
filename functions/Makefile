@@ -1,6 +1,4 @@
 
-#.PHONY : update
-
 export TARGET = test-cmd
 export OBJ_PATH = build/usr/bin
 

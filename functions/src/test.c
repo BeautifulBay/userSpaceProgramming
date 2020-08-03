@@ -6,10 +6,10 @@
 #define NAME_SIZE 32
 
 struct cmdlist {
-	const char name[NAME_SIZE];
-	int (*func)(int, char *[]);
+    const char name[NAME_SIZE];
+    int (*func)(int, char *[]);
 } command[] = {
-	#include "../build/cmdlist.inc"
+    #include "../build/cmdlist.inc"
     { "", NULL }
 };
 
