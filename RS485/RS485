@@ -1,0 +1,99 @@
+#!/usr/bin/python3
+# -*- coding = utf8 -*-
+
+import sys
+import os
+import termios
+import fcntl
+import array
+
+# UART Ports
+UART_PATH = {'1': '/dev/ttymxc4',
+             '2': '/dev/ttymxc5',
+}
+
+DATA = 'abcdefg'
+
+class RS485:
+    def __init__(self, port, speed, block):
+        self.port = port
+        self.speed = speed
+        self.block = block
+        if self.block == True:
+            self.vmin = len(DATA)
+            self.vtime = 0
+        else : #NON block
+            self.vmin = 0
+            self.vtime = 5
+
+    def openPort(self): #os.O_NDELAY
+        try :
+            if self.block == True:
+                self.fd = os.open(self.port, os.O_RDWR | os.O_NOCTTY | os.O_SYNC)
+            else :
+                self.fd = os.open(self.port, os.O_RDWR | os.O_NOCTTY | os.O_SYNC | os.O_NDELAY | os.O_NONBLOCK)
+        except :
+            raise Exception("Open %s failed" % self.port)
+
+    def setupPort(self):
+        # RS485 IOCTL definitions
+        TIOCGRS485 = 0x542E
+        TIOCSRS485 = 0x542F
+        SER_RS485_ENABLED = 0b00000001
+        SER_RS485_RTS_ON_SEND = 0b00000010
+
+        try:
+            iflag, oflag, cflag, lflag, ispeed, ospeed, cc = termios.tcgetattr(self.fd)
+        except termios.error as msg:      #if a port is nonexistent but has a /dev file, it'll fail here
+            raise Exception("Could not configure port: %s" % msg)
+
+        # setup baud rate
+        try:
+            ispeed = ospeed = getattr(termios,'B%s' % (self.speed))
+        except AttributeError:
+            ispeed = ospeed = termios.B38400
+
+        # buffer
+        # vmin "minimal number of characters to be read. = for non blocking"
+        cc[termios.VMIN] = self.vmin
+        # vtime
+        cc[termios.VTIME] = self.vtime
+        
+        cflag = termios.CLOCAL | termios.CREAD | termios.CS8
+        # activate settings
+        termios.tcsetattr(self.fd, termios.TCSANOW, [0, 0, cflag, 0, ispeed, ospeed, cc])
+
+        # Set RS485 mode
+        buf = array.array('i', [0] * 8)
+        fcntl.ioctl(self.fd, TIOCGRS485, buf)
+        buf[0] |= SER_RS485_ENABLED | SER_RS485_RTS_ON_SEND
+        fcntl.ioctl(self.fd, TIOCSRS485, buf)
+
+    def write(self, buf):
+        os.write(self.fd, buf)
+
+    def read(self, buf_max):
+        return os.read(self.fd, buf_max)
+
+    def close(self):
+        os.close(self.fd)
+
+if __name__ == "__main__":
+    uart1 = RS485(port = UART_PATH['1'], speed = 38400, block = False)
+    uart1.openPort()
+    uart1.setupPort()
+
+    uart2 = RS485(port = UART_PATH['2'], speed = 38400, block = True)
+    uart2.openPort()
+    uart2.setupPort()
+
+    print("send = %s" % DATA)
+    uart1.write(bytearray(DATA, encoding = "utf8"))
+
+    data = uart2.read(1024)
+    print("read = %s" % data.decode('utf8'))
+    if data.decode('utf8') == DATA:
+        print('You\'re great')
+
+    uart1.close()
+    uart2.close()
